@@ -64,6 +64,23 @@ can miss capture. Dust commitments remain economically farmable, and cooldown or
 lottery allocation. Use expendable test ETH only. Owner demo controls still deliberately force direct
 outcomes; forcing is visible and does not override a committed ticket's draw.
 
+### F11 — Nested-unlock forced failure of captured tickets (fixed in this revision)
+
+Reported by the independent reviewer (id `1c5d9f017cbb…`), reproduced with the supplied proof
+copied to `test/scratch/`: an outsider opened its own `PoolManager.unlock` and called
+`HauntedGame.execute(id)` from its `unlockCallback`. Both of the game's unlock calls reverted
+`AlreadyUnlocked`, the `try/catch` recorded a `TradeFailed`, the drawn fee stayed charged, the ticket
+was marked resolved and a drawn MiniJackpot was never paid. This was the same forced paid failure
+that the fixed gas budget closes for the underfunded-gas route, reachable by another route.
+
+Fix: `execute`, `expire` and `flushFees` carry a `notInsideUnlock` modifier that reads the manager's
+transient lock slot (`TransientStateLibrary.isUnlocked`) and reverts `ManagerUnlocked` before any
+state change. The call as a whole reverts, so the ticket stays open and no fee moves; a later
+top-level call settles it with the same stored draw. Covered by
+`test_executeInsideForeignUnlockIsRefusedAndTicketStaysOpen` (refusal of all three entry points,
+unchanged ticket and balances, then a normal settlement paying the 3% jackpot) and by the reviewer's
+proof. `docs/game.md` documents that keepers must settle from outside a PoolManager unlock.
+
 ### F4 — Charity address and owner are policy inputs (open item for the manifest)
 
 `CharityVault` needs a nonzero charity address and both vaults and the hook need `$owner`. The

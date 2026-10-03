@@ -60,6 +60,12 @@ stateDiagram-v2
   and credits the input **after** the drawn fee. The isolated swap and its game effects roll back;
   the previously charged fee does not. A tight minimum output cannot make all paying outcomes free
   to abandon. Keepers may execute tickets even when the player would prefer to abandon them.
+* `execute`, `expire` and `flushFees` revert `ManagerUnlocked` when called while the PoolManager is
+  already unlocked, that is from inside another contract's `unlockCallback`, a hook callback or a
+  router. The manager would reject the game's own unlock as `AlreadyUnlocked`, which must not count
+  as a failed trade: the ticket stays open, no fee is charged and a later top-level call settles
+  it with the same stored draw. Keepers must call these functions from a top-level transaction or
+  from a contract that is not itself inside a PoolManager unlock.
 * When the pool has no active liquidity, fee donation can fail. `lpFees0/1` remain reserved in the
   game and cannot be withdrawn by a player or administrator. Anyone can call `flushFees()` when
   liquidity returns. Fees go to the LPs active at donation time, including liquidity added later;

@@ -6,6 +6,8 @@ import {HauntedGame} from "../src/HauntedGame.sol";
 import {HauntedHook} from "../src/HauntedHook.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
+import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 
 contract RejectGameETH {
     receive() external payable {
@@ -26,6 +28,31 @@ contract ReenterGameWithdrawal {
         catch {
             rejected = true;
         }
+    }
+}
+
+/// @dev An outsider that opens its own PoolManager unlock and calls the game's settlement entry
+/// points from inside it, where the game's own manager.unlock would revert AlreadyUnlocked.
+contract NestedUnlockCaller is IUnlockCallback {
+    IPoolManager private manager;
+    HauntedGame private game;
+    bytes public lastReason;
+
+    constructor(IPoolManager m, HauntedGame g) {
+        manager = m;
+        game = g;
+    }
+
+    function callInsideUnlock(bytes calldata innerCall) external {
+        manager.unlock(innerCall);
+    }
+
+    function unlockCallback(bytes calldata innerCall) external returns (bytes memory) {
+        require(msg.sender == address(manager), "not manager");
+        (bool ok, bytes memory reason) = address(game).call(innerCall);
+        require(!ok, "inner call must be refused");
+        lastReason = reason;
+        return "";
     }
 }
 
@@ -166,6 +193,46 @@ contract HauntedGameTest is HauntedFixture {
         assertEq(address(game).balance, 1 ether);
         game.execute(id);
         assertGt(game.credit(address(this), address(token)), 0);
+    }
+
+    /// @notice An outsider must not be able to turn a captured winning ticket into a paid failure by
+    /// calling execute from inside its own PoolManager unlock. The call reverts before any state
+    /// change, the ticket stays open, and a top-level execute still trades and pays the jackpot.
+    function test_executeInsideForeignUnlockIsRefusedAndTicketStaysOpen() public {
+        jackpot.fund{value: 100 ether}();
+        vm.deal(alice, 1 ether);
+        vm.prank(alice);
+        uint256 id = game.commit{value: 1 ether}(true, 1 ether, 1);
+        prepareDraw(id, HauntedHook.Outcome.MiniJackpot);
+        uint256 managerBefore = address(manager).balance;
+
+        NestedUnlockCaller outsider = new NestedUnlockCaller(manager, game);
+        vm.prank(bob);
+        outsider.callInsideUnlock(abi.encodeCall(HauntedGame.execute, (id)));
+        assertEq(outsider.lastReason(), abi.encodeWithSelector(HauntedGame.ManagerUnlocked.selector));
+        (,,,,,, bool resolved) = game.tickets(id);
+        assertFalse(resolved, "ticket must stay open");
+        assertEq(game.lpFees0(), 0, "no fee charged");
+        assertEq(address(manager).balance, managerBefore, "no fee donated");
+        assertEq(game.credit(alice, address(0)), 0);
+        assertEq(game.credit(alice, address(token)), 0);
+
+        // expire and flushFees are refused the same way while the manager is unlocked.
+        outsider.callInsideUnlock(abi.encodeCall(HauntedGame.expire, (id)));
+        assertEq(outsider.lastReason(), abi.encodeWithSelector(HauntedGame.ManagerUnlocked.selector));
+        outsider.callInsideUnlock(abi.encodeCall(HauntedGame.flushFees, ()));
+        assertEq(outsider.lastReason(), abi.encodeWithSelector(HauntedGame.ManagerUnlocked.selector));
+
+        // A top-level execute by anyone then settles the ticket normally.
+        vm.prank(bob);
+        game.execute(id);
+        assertGt(game.credit(alice, address(token)), 0, "committed swap traded");
+        assertEq(game.credit(alice, address(0)), 0);
+        assertEq(address(manager).balance - managerBefore, 1 ether, "fee donated once plus net input swapped");
+        assertEq(game.lpFees0(), 0);
+        assertEq(address(game).balance, 0);
+        assertEq(alice.balance, 3 ether, "drawn jackpot paid to the committed player");
+        assertEq(jackpot.totalReleased(), 3 ether);
     }
 
     function test_missingCaptureRefundsLessMaximumFeeWithoutReroll() public {

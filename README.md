@@ -59,6 +59,8 @@ block, 128 blocks after commitment; anyone can execute after that block. The pla
 parameters cannot change. Fees come from escrow and are donated to LPs before the isolated swap;
 the hook applies a zero additional LP fee to avoid charging twice. Failed swaps still pay their
 drawn fee. Missing entropy refunds the input less the maximum 5% fee, with no reroll.
+Settlement calls (`execute`, `expire`, `flushFees`) refuse to run while the PoolManager is already
+unlocked (`ManagerUnlocked`), so a nested call cannot turn a captured ticket into a paid failure.
 Outputs and refunds are claimed through `withdraw`. See [the game protocol](docs/game.md) for the
 complete state machine, failure paths, fee rounding and keeper duties. The frontend must disclose
 the delay and failure fee before accepting a commitment.

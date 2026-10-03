@@ -12,6 +12,7 @@ import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {LPFeeLibrary} from "v4-core/libraries/LPFeeLibrary.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TransientStateLibrary} from "v4-core/libraries/TransientStateLibrary.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -27,10 +28,13 @@ interface IHauntedRules {
 /// block. Missing capture refunds the input less the 5% maximum fee, credited to LPs. A captured
 /// ticket cannot be cancelled or rerolled; anyone may execute it. Slippage failures still pay the
 /// drawn fee, preventing a min-output limit from selecting only free trades. Withdrawals are pull-based.
+/// Settlement refuses to run inside another PoolManager unlock: the manager would reject the
+/// game's own unlock as AlreadyUnlocked, and a caller must not be able to turn that into a paid failure.
 contract HauntedGame is IUnlockCallback, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using PoolIdLibrary for PoolKey;
     using StateLibrary for IPoolManager;
+    using TransientStateLibrary for IPoolManager;
 
     struct Ticket {
         address player;
@@ -87,6 +91,15 @@ contract HauntedGame is IUnlockCallback, ReentrancyGuard {
     error SlippageOrPartialFill();
     error TransferFailed();
     error InsufficientExecutionGas();
+    error ManagerUnlocked();
+
+    /// @dev A call nested inside someone else's PoolManager unlock cannot open the game's own unlock,
+    /// so every swap or donation attempt would revert AlreadyUnlocked and be recorded as a failure.
+    /// Refuse before any state change; the ticket stays open and can be settled by a top-level call.
+    modifier notInsideUnlock() {
+        if (manager.isUnlocked()) revert ManagerUnlocked();
+        _;
+    }
 
     constructor(address manager_, address token_, address hook_) {
         if (manager_ == address(0) || token_ == address(0) || hook_ == address(0)) revert InvalidInput();
@@ -148,7 +161,8 @@ contract HauntedGame is IUnlockCallback, ReentrancyGuard {
     }
 
     /// @notice Anyone can resolve a committed ticket; outputs/refunds always belong to its player.
-    function execute(uint256 id) external nonReentrant {
+    /// @dev Reverts ManagerUnlocked when called from inside a PoolManager unlock (see notInsideUnlock).
+    function execute(uint256 id) external nonReentrant notInsideUnlock {
         Ticket storage t = tickets[id];
         if (t.resolved) revert AlreadyResolved();
         (uint256 roll, uint24 fee) = draw(id);
@@ -175,7 +189,7 @@ contract HauntedGame is IUnlockCallback, ReentrancyGuard {
     }
 
     /// @notice If nobody captured the exact beacon block, refund less the maximum LP fee; never reroll.
-    function expire(uint256 id) external nonReentrant {
+    function expire(uint256 id) external nonReentrant notInsideUnlock {
         Ticket storage t = tickets[id];
         if (t.player == address(0)) revert InvalidInput();
         if (t.resolved) revert AlreadyResolved();
@@ -202,7 +216,7 @@ contract HauntedGame is IUnlockCallback, ReentrancyGuard {
     }
 
     /// @notice Retry LP fee delivery when liquidity returns. Reserved fees have no other withdrawal path.
-    function flushFees() external nonReentrant {
+    function flushFees() external nonReentrant notInsideUnlock {
         _flushFees();
     }
 

@@ -702,6 +702,11 @@
   },
   {
     "type": "error",
+    "name": "ManagerUnlocked",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NotReady",
     "inputs": []
   },
