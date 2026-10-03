@@ -7,8 +7,8 @@ import {HauntedVault} from "./HauntedVault.sol";
 /// @notice ETH reserve for the "charity signal" swap outcome. A donation is at most 1% of the
 /// reserve (MAX_DONATION_BPS, immutable), at most once per cooldown, only while not paused, only
 /// to the configured charity address, and only when requested by a SIGNALER_ROLE holder (the
-/// HauntedHook once the admin grants it the role).
-/// @dev No admin withdrawal exists. The admin may re-point the charity address (event emitted).
+/// HauntedHook, granted atomically by the launch bundle).
+/// @dev The admin can change the charity to itself and grant itself SIGNALER_ROLE; caps and cooldown still apply.
 contract CharityVault is HauntedVault {
     /// @notice Role allowed to trigger donations. Intended holder: the HauntedHook.
     bytes32 public constant SIGNALER_ROLE = keccak256("SIGNALER_ROLE");
@@ -25,7 +25,7 @@ contract CharityVault is HauntedVault {
     /// @param admin Project owner: DEFAULT_ADMIN_ROLE and PAUSER_ROLE.
     /// @param charity_ Donation recipient; nonzero.
     /// @param donationBps Opening donation share in basis points, in (0, 100].
-    /// @param cooldownSeconds Minimum seconds between two donations, at most 30 days.
+    /// @param cooldownSeconds Minimum seconds between two donations, in 1 second..30 days.
     constructor(address admin, address charity_, uint256 donationBps, uint256 cooldownSeconds)
         HauntedVault(admin, MAX_DONATION_BPS, donationBps, cooldownSeconds)
     {
@@ -48,6 +48,7 @@ contract CharityVault is HauntedVault {
 
     function _setCharity(address newCharity) private {
         if (newCharity == address(0)) revert ZeroAddress();
+        if (newCharity == address(this)) revert SelfRecipient();
         emit CharityUpdated(charity, newCharity);
         charity = newCharity;
     }

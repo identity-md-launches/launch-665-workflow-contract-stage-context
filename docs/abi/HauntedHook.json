@@ -136,6 +136,19 @@
   },
   {
     "type": "function",
+    "name": "INITIAL_SQRT_PRICE_X96",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint160",
+        "internalType": "uint160"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "LORE_FRAGMENTS",
     "inputs": [],
     "outputs": [
@@ -1201,6 +1214,19 @@
   },
   {
     "type": "function",
+    "name": "game",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract HauntedGame"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "getHookPermissions",
     "inputs": [],
     "outputs": [
@@ -2090,6 +2116,16 @@
   },
   {
     "type": "error",
+    "name": "InvalidPoolConfiguration",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "MissingBeneficiary",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "NoPendingSwap",
     "inputs": []
   },
@@ -2122,6 +2158,11 @@
   },
   {
     "type": "error",
+    "name": "PoolAlreadyHaunted",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "PoolFeeNotDynamic",
     "inputs": []
   },
@@ -2150,6 +2191,17 @@
     "type": "error",
     "name": "UnsupportedPair",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "VaultHasNoCode",
+    "inputs": [
+      {
+        "name": "vault",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

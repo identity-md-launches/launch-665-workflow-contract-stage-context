@@ -5,9 +5,8 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 
 /// @title HookSaltMiner
 /// @notice Pure helpers to find a CREATE2 salt whose resulting address carries exactly the Uniswap v4
-/// permission bits the HauntedHook declares. Used by the deploy script and the tests; the network's
-/// deployer must do the same for the launch salt, because the PoolManager reads permissions from the
-/// address and the hook constructor refuses an address with the wrong bits.
+/// permission bits the HauntedHook declares. Used by the constructor-only launch bundle, script
+/// and tests. The hook constructor refuses an address with the wrong bits.
 library HookSaltMiner {
     /// @notice The low 14 bits of a hook address encode its permissions.
     uint160 internal constant ALL_HOOK_MASK = uint160((1 << 14) - 1);
@@ -30,16 +29,27 @@ library HookSaltMiner {
 
     /// @notice Scans salts `start, start+1, ...` (at most `maxAttempts`) for one whose CREATE2
     /// address from `deployer` with `initCodeHash` has exactly `flags` in its low 14 bits.
-    /// @dev Expected attempts: 2^14 = 16,384. Off-chain or in a test this is cheap; it is not
-    /// meant to run inside a transaction.
+    /// @dev Expected attempts: 2^14 = 16,384. Reuses one memory buffer so constructor mining does
+    /// not accumulate memory expansion costs. Deployment gas must still be estimated for its inputs.
     function mine(address deployer, bytes32 initCodeHash, uint160 flags, uint256 start, uint256 maxAttempts)
         internal
         pure
         returns (bytes32 salt, address predicted)
     {
+        uint256 buffer;
+        assembly ("memory-safe") {
+            buffer := mload(0x40)
+            mstore(0x40, add(buffer, 128))
+            mstore(buffer, shl(248, 0xff))
+            mstore(add(buffer, 1), shl(96, deployer))
+            mstore(add(buffer, 53), initCodeHash)
+        }
         for (uint256 i; i < maxAttempts; ++i) {
             salt = bytes32(start + i);
-            predicted = predict(deployer, salt, initCodeHash);
+            assembly ("memory-safe") {
+                mstore(add(buffer, 21), salt)
+                predicted := and(keccak256(buffer, 85), 0xffffffffffffffffffffffffffffffffffffffff)
+            }
             if (hasExactFlags(predicted, flags)) return (salt, predicted);
         }
         revert SaltNotFound(start, maxAttempts);

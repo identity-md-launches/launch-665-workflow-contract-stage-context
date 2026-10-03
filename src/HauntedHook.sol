@@ -17,10 +17,11 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {JackpotVault} from "./JackpotVault.sol";
 import {CharityVault} from "./CharityVault.sol";
 import {HookSaltMiner} from "./HookSaltMiner.sol";
+import {HauntedGame} from "./HauntedGame.sol";
 
 /// @title HauntedHook
-/// @notice Uniswap v4 hook of the Haunted Liquidity Pool. It haunts dynamic-fee ETH/VOID pools:
-/// every swap is resolved into exactly one of eight outcomes, each with its own event.
+/// @notice Uniswap v4 hook of the single Haunted Liquidity Pool. Committed game trades have eight
+/// outcomes; ordinary router swaps use NormalTrade without changing game state.
 ///
 /// | Outcome          | LP fee for the swap                      | Side effect                                  |
 /// |------------------|------------------------------------------|----------------------------------------------|
@@ -34,12 +35,12 @@ import {HookSaltMiner} from "./HookSaltMiner.sol";
 /// | RealityCollapse  | 5%                                       | corruption resets to 0                       |
 ///
 /// Hook callbacks: afterInitialize (admits the pool and sets the 0.30% opening fee), beforeSwap
-/// (draws the outcome and overrides the fee), afterSwap (applies the side effects and emits).
+/// (selects a committed outcome or ordinary fee), afterSwap (applies the side effects and emits).
+/// Game fees in the table are paid from escrow before swapping, with zero additional hook LP fee.
 ///
-/// @dev Randomness is NOT secure: the draw mixes a rolling seed, block.prevrandao, the swap
-/// parameters and the swap index. A searcher can simulate it. Exposure is bounded by the vaults'
-/// caps and cooldowns and by the burn caps; see the README. Vault calls are wrapped in try/catch so
-/// a paused, empty or cooling-down vault never blocks a swap.
+/// @dev Unforced draws require an escrowed HauntedGame ticket committed before future beacon entropy.
+/// Ordinary router swaps pay BASE_FEE and do not advance the game. Sepolia owner overrides remain
+/// explicit and immediate. See HauntedGame for capture, fee and refund semantics.
 contract HauntedHook is IHooks, Ownable2Step {
     using PoolIdLibrary for PoolKey;
     using LPFeeLibrary for uint24;
@@ -59,14 +60,18 @@ contract HauntedHook is IHooks, Ownable2Step {
     struct Pending {
         bool active;
         bool forced;
+        bool playing;
         Outcome outcome;
         uint24 fee;
         address beneficiary;
         uint256 roll;
+        uint256 pricingCorruption;
     }
 
     /// @notice Permission bits the hook address must carry: afterInitialize | beforeSwap | afterSwap = 0x10C0.
     uint160 public constant REQUIRED_FLAGS = HookSaltMiner.HAUNTED_HOOK_FLAGS;
+    /// @notice The one haunted pool has a canonical opening price and tick spacing.
+    uint160 public constant INITIAL_SQRT_PRICE_X96 = 1 << 96;
 
     /// @notice Basis-point denominator.
     uint256 public constant BPS = 10_000;
@@ -78,7 +83,7 @@ contract HauntedHook is IHooks, Ownable2Step {
     uint24 public constant CORRUPTION_FEE_STEP = 500;
     /// @notice Corruption level is bounded.
     uint256 public constant MAX_CORRUPTION = 100;
-    /// @notice Corruption gained by an ordinary swap and by a corrupted-fee swap.
+    /// @notice Corruption gained by a non-collapse game outcome and by a corrupted-fee outcome.
     uint256 public constant CORRUPTION_PER_SWAP = 1;
     uint256 public constant CORRUPTION_PER_CORRUPTED_SWAP = 5;
     /// @notice Hard cap of `burnBps`: 5% of the VOID moved by the swap.
@@ -100,12 +105,13 @@ contract HauntedHook is IHooks, Ownable2Step {
     IERC20 public immutable voidToken;
     JackpotVault public immutable jackpotVault;
     CharityVault public immutable charityVault;
+    HauntedGame public immutable game;
 
-    /// @notice Pools admitted by afterInitialize (dynamic-fee ETH/VOID pools using this hook).
+    /// @notice The one canonical pool admitted by afterInitialize.
     mapping(PoolId => bool) public haunted;
     uint256 public hauntedPools;
 
-    /// @notice Game state, shared by every haunted pool.
+    /// @notice Game state for the canonical haunted pool.
     uint256 public corruption;
     uint256 public swapCount;
     uint256 public collapseCount;
@@ -158,6 +164,10 @@ contract HauntedHook is IHooks, Ownable2Step {
     error HookNotImplemented();
     error HookAddressNotValid(address hook);
     error ZeroAddress();
+    error VaultHasNoCode(address vault);
+    error MissingBeneficiary();
+    error InvalidPoolConfiguration();
+    error PoolAlreadyHaunted();
     error PoolFeeNotDynamic();
     error UnsupportedPair();
     error PoolNotHaunted();
@@ -174,8 +184,8 @@ contract HauntedHook is IHooks, Ownable2Step {
     /// @param poolManager_ The chain's Uniswap v4 PoolManager.
     /// @param voidToken_ The VOID launch token (currency1 of every haunted pool).
     /// @param initialOwner Holder of the admin test controls (the project owner, `$owner` in the manifest).
-    /// @param jackpotVault_ JackpotVault whose PAYER_ROLE the owner grants to this hook.
-    /// @param charityVault_ CharityVault whose SIGNALER_ROLE the owner grants to this hook.
+    /// @param jackpotVault_ JackpotVault whose PAYER_ROLE the launch bundle grants to this hook.
+    /// @param charityVault_ CharityVault whose SIGNALER_ROLE the launch bundle grants to this hook.
     constructor(
         address poolManager_,
         address voidToken_,
@@ -185,6 +195,8 @@ contract HauntedHook is IHooks, Ownable2Step {
     ) Ownable(initialOwner) {
         if (poolManager_ == address(0) || voidToken_ == address(0)) revert ZeroAddress();
         if (jackpotVault_ == address(0) || charityVault_ == address(0)) revert ZeroAddress();
+        if (jackpotVault_.code.length == 0) revert VaultHasNoCode(jackpotVault_);
+        if (charityVault_.code.length == 0) revert VaultHasNoCode(charityVault_);
         // Same check BaseHook performs: the address bits must match the declared permissions exactly,
         // otherwise the PoolManager would call callbacks this contract does not implement, or skip ours.
         if (uint160(address(this)) & Hooks.ALL_HOOK_MASK != REQUIRED_FLAGS) revert HookAddressNotValid(address(this));
@@ -192,6 +204,7 @@ contract HauntedHook is IHooks, Ownable2Step {
         voidToken = IERC20(voidToken_);
         jackpotVault = JackpotVault(payable(jackpotVault_));
         charityVault = CharityVault(payable(charityVault_));
+        game = new HauntedGame(poolManager_, voidToken_, address(this));
         seed = keccak256(abi.encode("HauntedLiquidityPool", block.chainid, address(this)));
     }
 
@@ -233,6 +246,8 @@ contract HauntedHook is IHooks, Ownable2Step {
         if (!key.currency0.isAddressZero() || Currency.unwrap(key.currency1) != address(voidToken)) {
             revert UnsupportedPair();
         }
+        if (hauntedPools != 0) revert PoolAlreadyHaunted();
+        if (key.tickSpacing != 60 || sqrtPriceX96 != INITIAL_SQRT_PRICE_X96) revert InvalidPoolConfiguration();
         PoolId id = key.toId();
         haunted[id] = true;
         ++hauntedPools;
@@ -250,21 +265,33 @@ contract HauntedHook is IHooks, Ownable2Step {
         if (_pending.active) revert SwapAlreadyPending();
         if (!haunted[key.toId()]) revert PoolNotHaunted();
 
-        address beneficiary = _beneficiary(sender, hookData);
-        bytes32 next = keccak256(
-            abi.encode(
-                seed, block.prevrandao, sender, beneficiary, params.amountSpecified, params.zeroForOne, swapCount
-            )
-        );
-        seed = next;
-        uint256 roll = uint256(next) % ROLL_RANGE;
-        bool forced = forcedOutcomeActive;
-        Outcome outcome = forced ? forcedOutcome : outcomeForRoll(roll, corruption);
-        uint24 fee = feeForOutcome(outcome, corruption);
+        address beneficiary = _beneficiary(hookData);
+        bool committed = sender == address(game) && game.executing();
+        bool forced = !committed && forcedOutcomeActive;
+        uint256 roll = committed ? game.activeRoll() : 0;
+        uint256 level = committed ? game.activeLevel() : corruption;
+        Outcome outcome = committed ? outcomeForRoll(roll, level) : forced ? forcedOutcome : Outcome.NormalTrade;
+        uint24 fee = feeForOutcome(outcome, level);
+        seed = keccak256(abi.encode(seed, sender, beneficiary, params.amountSpecified, swapCount, roll));
 
-        _pending =
-            Pending({active: true, forced: forced, outcome: outcome, fee: fee, beneficiary: beneficiary, roll: roll});
-        return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, fee | LPFeeLibrary.OVERRIDE_FEE_FLAG);
+        _pending = Pending({
+            active: true,
+            forced: forced,
+            playing: committed || forced,
+            outcome: outcome,
+            fee: fee,
+            beneficiary: beneficiary,
+            roll: roll,
+            pricingCorruption: level
+        });
+        // Committed trades already paid their fee from escrow; do not charge it twice.
+        uint24 overrideFee = committed ? 0 : fee;
+        return
+            (
+                IHooks.beforeSwap.selector,
+                BeforeSwapDeltaLibrary.ZERO_DELTA,
+                overrideFee | LPFeeLibrary.OVERRIDE_FEE_FLAG
+            );
     }
 
     /// @inheritdoc IHooks
@@ -284,7 +311,8 @@ contract HauntedHook is IHooks, Ownable2Step {
 
         // The pending flag stays set while side effects run, so a payout recipient that re-enters
         // the PoolManager and swaps on a haunted pool is refused by beforeSwap.
-        _applyOutcome(id, p, voidMoved);
+        if (p.playing && voidMoved != 0) _applyOutcome(id, p, voidMoved);
+        else emit NormalTrade(id, p.beneficiary, p.fee);
         emit SwapResolved(id, p.beneficiary, p.outcome, p.fee, p.roll, p.forced, corruption, swapIndex);
         delete _pending;
         return (IHooks.afterSwap.selector, 0);
@@ -373,10 +401,17 @@ contract HauntedHook is IHooks, Ownable2Step {
         emit OutcomeForced(outcome, true);
     }
 
-    /// @notice Return to random outcomes.
+    /// @notice Disable direct-swap demonstrations. Unforced game outcomes require funded commitments.
     function clearForcedOutcome() external onlyOwner {
         forcedOutcomeActive = false;
         emit OutcomeForced(forcedOutcome, false);
+    }
+
+    /// @notice Renouncing also disables the Sepolia override, so it cannot be frozen forever.
+    function renounceOwnership() public override onlyOwner {
+        forcedOutcomeActive = false;
+        emit OutcomeForced(forcedOutcome, false);
+        super.renounceOwnership();
     }
 
     /// @notice Set the corruption level directly (0..100), e.g. to demonstrate the fee ceiling.
@@ -438,13 +473,13 @@ contract HauntedHook is IHooks, Ownable2Step {
     // Internals
     // ---------------------------------------------------------------------------------------------
 
-    /// @dev The swapper is whatever `hookData` names (abi-encoded address), else the router `sender`.
-    function _beneficiary(address sender, bytes calldata hookData) private pure returns (address) {
+    /// @dev Only an explicit, canonical nonzero address is eligible for a jackpot. Never use the router.
+    function _beneficiary(bytes calldata hookData) private pure returns (address) {
         if (hookData.length == 32) {
-            address named = abi.decode(hookData, (address));
-            if (named != address(0)) return named;
+            uint256 named = uint256(bytes32(hookData));
+            if (named <= type(uint160).max) return address(uint160(named));
         }
-        return sender;
+        return address(0);
     }
 
     function _applyOutcome(PoolId id, Pending memory p, uint256 voidMoved) private {
@@ -467,7 +502,7 @@ contract HauntedHook is IHooks, Ownable2Step {
         } else if (outcome == Outcome.FreeSwap) {
             emit FreeSwap(id, swapper);
         } else if (outcome == Outcome.CorruptedFee) {
-            emit CorruptedFee(id, swapper, p.fee, corruption);
+            emit CorruptedFee(id, swapper, p.fee, p.pricingCorruption);
         } else if (outcome == Outcome.VoidBurn) {
             uint256 amount = burnAmountFor(voidMoved);
             if (amount == 0) {
@@ -484,6 +519,10 @@ contract HauntedHook is IHooks, Ownable2Step {
             loreUnlockedMask |= 1 << fragment;
             emit LoreSignal(id, swapper, fragment, keccak256(abi.encode("VOID_LORE", fragment)), loreUnlockedMask);
         } else if (outcome == Outcome.MiniJackpot) {
+            if (swapper == address(0)) {
+                emit JackpotSkipped(id, swapper, abi.encodeWithSelector(MissingBeneficiary.selector));
+                return;
+            }
             try jackpotVault.payout(swapper) returns (uint256 amount) {
                 emit MiniJackpot(id, swapper, amount);
             } catch (bytes memory reason) {

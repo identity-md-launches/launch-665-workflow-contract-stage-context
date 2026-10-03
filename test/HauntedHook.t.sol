@@ -182,23 +182,14 @@ contract HauntedHookTest is HauntedFixture {
         manager.initialize(k, SQRT_PRICE_1_1);
     }
 
-    function test_secondHauntedPoolSharesState() public {
+    function test_secondHauntedPoolRejected() public {
         PoolKey memory k2 = hauntedKey(10);
-        vm.expectEmit(address(hook));
-        emit HauntedHook.PoolHaunted(k2.toId(), address(this), SQRT_PRICE_1_1, 0);
+        vm.expectRevert(
+            wrapped(IHooks.afterInitialize.selector, abi.encodeWithSelector(HauntedHook.PoolAlreadyHaunted.selector))
+        );
         manager.initialize(k2, SQRT_PRICE_1_1);
-        assertTrue(hook.haunted(k2.toId()));
-        assertEq(hook.hauntedPools(), 2);
-        (,,, uint24 fee2) = manager.getSlot0(k2.toId());
-        assertEq(fee2, 3000);
-
-        lpRouter.modifyLiquidity{value: 20 ether}(k2, ModifyLiquidityParams(-887_220, 887_220, 1e19, 0), "");
-        vm.prank(owner);
-        hook.forceOutcome(HauntedHook.Outcome.NormalTrade);
-        swapAs(address(this), k2, true, -0.01 ether, "");
-        swap(true, -0.01 ether, "");
-        assertEq(hook.swapCount(), 2);
-        assertEq(hook.corruption(), 2);
+        assertFalse(hook.haunted(k2.toId()));
+        assertEq(hook.hauntedPools(), 1);
     }
 
     // ------------------------------------------------------------------ pure rules
@@ -296,7 +287,7 @@ contract HauntedHookTest is HauntedFixture {
         uint24 fee = 3000 + 10 * 500;
         uint256 out = expectedOut(true, 1 ether, fee);
         vm.expectEmit(address(hook));
-        emit HauntedHook.CorruptedFee(poolId, alice, fee, 15);
+        emit HauntedHook.CorruptedFee(poolId, alice, fee, 10);
         BalanceDelta d = swap(true, ONE_ETH_IN, abi.encode(alice));
         assertEq(abs1(d), out, "corrupted fee applied");
         assertEq(hook.corruption(), 15, "+5 corruption");
@@ -413,16 +404,13 @@ contract HauntedHookTest is HauntedFixture {
         assertEq(jackpot.reserve(), 9.7 ether);
     }
 
-    /// @dev Without hookData the beneficiary is the router. PoolSwapTest cannot receive ETH, so the
-    /// vault's transfer fails, the hook records a skipped jackpot and the swap still completes.
-    function test_jackpotFallsBackToRouterWithoutHookData() public {
+    /// @dev Missing beneficiaries skip the vault call without consuming its cooldown.
+    function test_jackpotSkippedWithoutHookData() public {
         jackpot.fund{value: 10 ether}();
         force(HauntedHook.Outcome.MiniJackpot);
         vm.expectEmit(address(hook));
         emit HauntedHook.JackpotSkipped(
-            poolId,
-            address(swapRouter),
-            abi.encodeWithSelector(HauntedVault.TransferFailed.selector, address(swapRouter), 0.3 ether)
+            poolId, address(0), abi.encodeWithSelector(HauntedHook.MissingBeneficiary.selector)
         );
         swap(true, ONE_ETH_IN, "");
         assertEq(jackpot.reserve(), 10 ether);
@@ -430,19 +418,19 @@ contract HauntedHookTest is HauntedFixture {
         assertEq(hook.swapCount(), 1);
     }
 
-    function test_zeroHookDataAddressFallsBackToRouter() public {
+    function test_zeroHookDataAddressSkipsJackpot() public {
         jackpot.fund{value: 10 ether}();
         force(HauntedHook.Outcome.MiniJackpot);
         vm.expectEmit(true, true, false, false, address(hook));
-        emit HauntedHook.JackpotSkipped(poolId, address(swapRouter), "");
+        emit HauntedHook.JackpotSkipped(poolId, address(0), "");
         swap(true, ONE_ETH_IN, abi.encode(address(0)));
     }
 
-    function test_malformedHookDataFallsBackToRouter() public {
+    function test_malformedHookDataSkipsJackpot() public {
         jackpot.fund{value: 10 ether}();
         force(HauntedHook.Outcome.MiniJackpot);
         vm.expectEmit(true, true, false, false, address(hook));
-        emit HauntedHook.JackpotSkipped(poolId, address(swapRouter), "");
+        emit HauntedHook.JackpotSkipped(poolId, address(0), "");
         swap(true, ONE_ETH_IN, hex"deadbeef");
     }
 
@@ -557,12 +545,13 @@ contract HauntedHookTest is HauntedFixture {
         charity.fund{value: 10 ether}();
         for (uint8 i; i < 8; ++i) {
             HauntedHook.Outcome target = HauntedHook.Outcome(i);
-            steer(target, address(swapRouter), alice, -0.5 ether, true);
+            uint256 ticket = hook.game().commit{value: 0.5 ether}(true, 0.5 ether, 1);
+            prepareDraw(ticket, target);
             uint256 corruptionBefore = hook.corruption();
             uint256 swapsBefore = hook.swapCount();
             vm.expectEmit(true, true, true, false, address(hook));
-            emit HauntedHook.SwapResolved(poolId, alice, target, 0, 0, false, 0, 0);
-            swap(true, -0.5 ether, abi.encode(alice));
+            emit HauntedHook.SwapResolved(poolId, address(this), target, 0, 0, false, 0, 0);
+            hook.game().execute(ticket);
             assertEq(hook.swapCount(), swapsBefore + 1);
             if (target == HauntedHook.Outcome.RealityCollapse) assertEq(hook.corruption(), 0);
             else if (target == HauntedHook.Outcome.CorruptedFee) assertEq(hook.corruption(), corruptionBefore + 5);

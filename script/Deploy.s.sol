@@ -7,12 +7,13 @@ import {JackpotVault} from "../src/JackpotVault.sol";
 import {CharityVault} from "../src/CharityVault.sol";
 import {HauntedHook} from "../src/HauntedHook.sol";
 import {HookSaltMiner} from "../src/HookSaltMiner.sol";
+import {HauntedDeployment} from "../src/HauntedDeployment.sol";
 
 /// @title Deploy
 /// @notice Standalone deployment of the Haunted Liquidity Pool contracts for a local chain or for an
 /// operator-run Sepolia test deployment. The production launch goes through the network's
-/// ProjectFactory, which deploys `LaunchToken`, then the vaults, then `HauntedHook` from the
-/// manifest with a salt whose address carries the hook permission bits; this script is not used there.
+/// ProjectFactory, which deploys `LaunchToken` and `HauntedDeployment`. The bundle mines its child
+/// hook salt and grants its roles in the constructor; this script is not used by that service.
 /// @dev `run()` reads only EXPECTED_CHAIN_ID, POOL_MANAGER, PROJECT_OWNER and CHARITY (plus optional
 /// cap/cooldown overrides) from the environment and refuses every chain except Anvil (31337) and
 /// Sepolia (11155111). It never reads a key: the broadcaster is whatever the operator passes to forge.
@@ -39,6 +40,7 @@ contract Deploy is Script {
         CharityVault charityVault;
         HauntedHook hook;
         bytes32 hookSalt;
+        HauntedDeployment bundle;
     }
 
     uint256 public constant ANVIL_CHAIN_ID = 31337;
@@ -52,7 +54,6 @@ contract Deploy is Script {
 
     error UnexpectedChainId(uint256 expected, uint256 actual);
     error UnsupportedChainId(uint256 chainId);
-    error HookAddressMismatch(address predicted, address deployed);
 
     /// @dev Reads the configuration from the environment and broadcasts one batch of deployments.
     function run() external returns (Deployment memory d) {
@@ -70,31 +71,29 @@ contract Deploy is Script {
             charityCooldown: vm.envOr("CHARITY_COOLDOWN", DEFAULT_CHARITY_COOLDOWN)
         });
 
-        // Under broadcast, forge routes salted `new` through the deterministic CREATE2 factory.
         vm.startBroadcast();
-        d = deploy(config, CREATE2_FACTORY);
+        d = deploy(config);
         vm.stopBroadcast();
     }
 
-    /// @notice Deploys the token (whole supply to the caller), both vaults and the hook at a mined
-    /// CREATE2 address. `create2Deployer` is the address that will execute the salted creation:
-    /// this contract when called directly (tests), the CREATE2 factory under broadcast.
-    function deploy(Config memory config, address create2Deployer) public returns (Deployment memory d) {
+    /// @notice Deploys the token and a fully wired constructor bundle. All salts used for child
+    /// hooks are mined by that bundle against its own address, including when run under broadcast.
+    function deploy(Config memory config) public returns (Deployment memory d) {
         d.token = new LaunchToken();
-        d.jackpotVault = new JackpotVault(config.owner, config.jackpotBps, config.jackpotCooldown);
-        d.charityVault = new CharityVault(config.owner, config.charity, config.charityBps, config.charityCooldown);
-
-        bytes memory initCode = hookInitCode(
-            config.poolManager, address(d.token), config.owner, address(d.jackpotVault), address(d.charityVault)
+        d.bundle = new HauntedDeployment(
+            config.poolManager,
+            address(d.token),
+            config.owner,
+            config.charity,
+            config.jackpotBps,
+            config.jackpotCooldown,
+            config.charityBps,
+            config.charityCooldown
         );
-        address predicted;
-        (d.hookSalt, predicted) = HookSaltMiner.mine(
-            create2Deployer, keccak256(initCode), HookSaltMiner.HAUNTED_HOOK_FLAGS, 0, MAX_SALT_ATTEMPTS
-        );
-        d.hook = new HauntedHook{salt: d.hookSalt}(
-            config.poolManager, address(d.token), config.owner, address(d.jackpotVault), address(d.charityVault)
-        );
-        if (address(d.hook) != predicted) revert HookAddressMismatch(predicted, address(d.hook));
+        d.jackpotVault = d.bundle.jackpotVault();
+        d.charityVault = d.bundle.charityVault();
+        d.hook = d.bundle.hook();
+        d.hookSalt = d.bundle.hookSalt();
     }
 
     /// @notice The exact creation code the factory (or anyone) must hash to mine the hook salt.

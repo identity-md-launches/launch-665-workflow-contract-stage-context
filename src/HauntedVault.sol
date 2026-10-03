@@ -8,10 +8,9 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// @title HauntedVault
 /// @notice Shared base of the JackpotVault and the CharityVault: an ETH reserve that releases at
 /// most a capped share of itself per trigger, never more often than one cooldown apart, only while
-/// not paused, and only to the caller holding the trigger role.
-/// @dev There is no administrative withdrawal: ETH leaves a vault only through `_release`, which
-/// is bounded by `MAX_RELEASE_BPS` of the reserve at the moment of the call. Funding is permissionless
-/// (plain transfers or `fund()`).
+/// not paused, and only when requested by a caller holding the trigger role.
+/// @dev ETH leaves only through capped releases. The admin can grant itself the trigger role and
+/// direct releases to itself, subject to the cap and cooldown. Funding is permissionless.
 abstract contract HauntedVault is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Role that may pause and unpause releases. Held by the admin at deployment.
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
@@ -21,6 +20,8 @@ abstract contract HauntedVault is AccessControl, Pausable, ReentrancyGuard {
 
     /// @notice Longest cooldown the admin may configure.
     uint256 public constant MAX_COOLDOWN = 30 days;
+    /// @notice A cooldown can never be disabled, including by the admin.
+    uint256 public constant MIN_COOLDOWN = 1;
 
     /// @notice Hard upper bound of a single release, in basis points of the reserve. Immutable per vault.
     uint256 public immutable MAX_RELEASE_BPS;
@@ -46,6 +47,7 @@ abstract contract HauntedVault is AccessControl, Pausable, ReentrancyGuard {
     event CooldownUpdated(uint256 previousCooldown, uint256 newCooldown);
 
     error ZeroAddress();
+    error SelfRecipient();
     error InvalidReleaseBps(uint256 bps, uint256 max);
     error InvalidCooldown(uint256 cooldown, uint256 max);
     error CooldownActive(uint256 availableAt);
@@ -55,7 +57,7 @@ abstract contract HauntedVault is AccessControl, Pausable, ReentrancyGuard {
     /// @param admin Holder of DEFAULT_ADMIN_ROLE and PAUSER_ROLE. The launch passes the project owner.
     /// @param maxReleaseBps Hard cap of one release, fixed for the vault's life (300 for the jackpot, 100 for charity).
     /// @param initialReleaseBps Opening release share; must be in (0, maxReleaseBps].
-    /// @param initialCooldown Opening cooldown in seconds; must be at most MAX_COOLDOWN.
+    /// @param initialCooldown Opening cooldown in seconds; MIN_COOLDOWN..MAX_COOLDOWN.
     constructor(address admin, uint256 maxReleaseBps, uint256 initialReleaseBps, uint256 initialCooldown) {
         if (admin == address(0)) revert ZeroAddress();
         if (maxReleaseBps == 0 || maxReleaseBps > BPS) revert InvalidReleaseBps(maxReleaseBps, BPS);
@@ -93,7 +95,7 @@ abstract contract HauntedVault is AccessControl, Pausable, ReentrancyGuard {
 
     /// @notice The earliest timestamp of the next release.
     function releaseAvailableAt() public view returns (uint256) {
-        return lastReleaseAt == 0 ? 0 : lastReleaseAt + cooldown;
+        return releaseCount == 0 ? 0 : lastReleaseAt + cooldown;
     }
 
     /// @notice Admin control: change the release share, never above the immutable cap.
@@ -101,7 +103,7 @@ abstract contract HauntedVault is AccessControl, Pausable, ReentrancyGuard {
         _setReleaseBps(newBps);
     }
 
-    /// @notice Admin control: change the cooldown, never above MAX_COOLDOWN.
+    /// @notice Admin control: change the cooldown within MIN_COOLDOWN..MAX_COOLDOWN.
     function setCooldown(uint256 newCooldown) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setCooldown(newCooldown);
     }
@@ -121,6 +123,7 @@ abstract contract HauntedVault is AccessControl, Pausable, ReentrancyGuard {
     /// a skipped release from a paid one.
     function _release(address to) internal nonReentrant whenNotPaused returns (uint256 amount) {
         if (to == address(0)) revert ZeroAddress();
+        if (to == address(this)) revert SelfRecipient();
         uint256 availableAt = releaseAvailableAt();
         if (block.timestamp < availableAt) revert CooldownActive(availableAt);
         uint256 reserveBefore = reserve();
@@ -143,7 +146,9 @@ abstract contract HauntedVault is AccessControl, Pausable, ReentrancyGuard {
     }
 
     function _setCooldown(uint256 newCooldown) private {
-        if (newCooldown > MAX_COOLDOWN) revert InvalidCooldown(newCooldown, MAX_COOLDOWN);
+        if (newCooldown < MIN_COOLDOWN || newCooldown > MAX_COOLDOWN) {
+            revert InvalidCooldown(newCooldown, MAX_COOLDOWN);
+        }
         emit CooldownUpdated(cooldown, newCooldown);
         cooldown = newCooldown;
     }

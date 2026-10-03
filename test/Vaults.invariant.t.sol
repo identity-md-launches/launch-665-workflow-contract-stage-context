@@ -86,7 +86,7 @@ contract VaultHandler is Test {
     }
 
     function setCooldown(uint256 cooldown) external {
-        cooldown = bound(cooldown, 0, 30 days);
+        cooldown = bound(cooldown, 1, 30 days);
         vm.prank(admin);
         vault.setCooldown(cooldown);
     }
@@ -124,6 +124,7 @@ abstract contract VaultInvariantBase is Test {
         assertGt(vault.releaseBps(), 0);
         assertLe(vault.releaseBps(), vault.MAX_RELEASE_BPS());
         assertLe(vault.cooldown(), vault.MAX_COOLDOWN());
+        assertGe(vault.cooldown(), vault.MIN_COOLDOWN());
         assertEq(vault.releaseCount(), handler.releases());
     }
 }

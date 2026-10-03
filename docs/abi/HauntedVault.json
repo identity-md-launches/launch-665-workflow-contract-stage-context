@@ -1,26 +1,5 @@
 [
   {
-    "type": "constructor",
-    "inputs": [
-      {
-        "name": "admin",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "payoutBps",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "cooldownSeconds",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
     "type": "receive",
     "stateMutability": "payable"
   },
@@ -65,19 +44,6 @@
   },
   {
     "type": "function",
-    "name": "MAX_PAYOUT_BPS",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "MAX_RELEASE_BPS",
     "inputs": [],
     "outputs": [
@@ -105,19 +71,6 @@
   {
     "type": "function",
     "name": "PAUSER_ROLE",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "PAYER_ROLE",
     "inputs": [],
     "outputs": [
       {
@@ -267,25 +220,6 @@
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "payout",
-    "inputs": [
-      {
-        "name": "winner",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -477,31 +411,6 @@
       },
       {
         "name": "reserve",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      }
-    ],
-    "anonymous": false
-  },
-  {
-    "type": "event",
-    "name": "JackpotPaid",
-    "inputs": [
-      {
-        "name": "winner",
-        "type": "address",
-        "indexed": true,
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
-      },
-      {
-        "name": "reserveBefore",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"

@@ -31,7 +31,7 @@ contract DeployTest is Test {
     }
 
     function test_deployWiresEverything() public {
-        Deploy.Deployment memory d = script.deploy(config(), address(script));
+        Deploy.Deployment memory d = script.deploy(config());
 
         assertEq(d.token.balanceOf(address(script)), 10 ** 27, "token supply to deployer");
         assertEq(address(d.hook.poolManager()), poolManager);
@@ -43,7 +43,7 @@ contract DeployTest is Test {
 
         assertTrue(d.jackpotVault.hasRole(d.jackpotVault.DEFAULT_ADMIN_ROLE(), owner));
         assertTrue(d.jackpotVault.hasRole(d.jackpotVault.PAUSER_ROLE(), owner));
-        assertFalse(d.jackpotVault.hasRole(d.jackpotVault.PAYER_ROLE(), address(d.hook)), "role granted by owner later");
+        assertTrue(d.jackpotVault.hasRole(d.jackpotVault.PAYER_ROLE(), address(d.hook)), "role granted atomically");
         assertEq(d.jackpotVault.releaseBps(), 300);
         assertEq(d.jackpotVault.cooldown(), 10 minutes);
         assertEq(d.charityVault.charity(), charityWallet);
@@ -52,10 +52,10 @@ contract DeployTest is Test {
     }
 
     function test_hookSaltMatchesInitCode() public {
-        Deploy.Deployment memory d = script.deploy(config(), address(script));
+        Deploy.Deployment memory d = script.deploy(config());
         bytes memory initCode =
             script.hookInitCode(poolManager, address(d.token), owner, address(d.jackpotVault), address(d.charityVault));
-        assertEq(HookSaltMiner.predict(address(script), d.hookSalt, keccak256(initCode)), address(d.hook));
+        assertEq(HookSaltMiner.predict(address(d.bundle), d.hookSalt, keccak256(initCode)), address(d.hook));
     }
 
     function test_mineHookSaltIsPure() public view {
@@ -70,11 +70,11 @@ contract DeployTest is Test {
         Deploy.Config memory c = config();
         c.jackpotBps = 301;
         vm.expectRevert();
-        script.deploy(c, address(script));
+        script.deploy(c);
     }
 
-    function test_hookAtWrongAddressReverts() public {
-        vm.expectPartialRevert(HauntedHook.HookAddressNotValid.selector);
+    function test_hookWithoutVaultCodeReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(HauntedHook.VaultHasNoCode.selector, address(0xB)));
         new HauntedHook(poolManager, address(0xA), owner, address(0xB), address(0xC));
     }
 }

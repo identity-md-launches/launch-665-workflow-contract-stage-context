@@ -271,7 +271,7 @@ contract VaultsTest is Test {
     }
 
     function testFuzz_cooldownRespected(uint256 cooldown, uint256 elapsed) public {
-        cooldown = bound(cooldown, 0, 30 days);
+        cooldown = bound(cooldown, 1, 30 days);
         elapsed = bound(elapsed, 0, 60 days);
         vm.prank(owner);
         jackpot.setCooldown(cooldown);

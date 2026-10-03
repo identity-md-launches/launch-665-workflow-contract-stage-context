@@ -152,26 +152,22 @@ abstract contract HauntedFixture is Test {
         (,,, fee) = manager.getSlot0(poolId);
     }
 
-    /// @dev Replicates the hook's draw and sets block.prevrandao so the next swap from `sender`
-    /// with these parameters resolves (unforced) to `target`.
-    function steer(
-        HauntedHook.Outcome target,
-        address sender,
-        address beneficiary,
-        int256 amountSpecified,
-        bool zeroForOne
-    ) internal {
-        bytes32 current = hook.seed();
-        uint256 count = hook.swapCount();
-        uint256 corruption = hook.corruption();
+    /// @dev Test-only beacon control, applied AFTER the funded commitment. No production caller
+    /// can set PREVRANDAO or execute a ticket before its fixed target block.
+    function prepareDraw(uint256 ticket, HauntedHook.Outcome target) internal {
+        (,,, uint256 targetBlock, uint256 level,,) = hook.game().tickets(ticket);
+        vm.roll(targetBlock);
         for (uint256 i = 1; i < 200_000; ++i) {
-            bytes32 next = keccak256(abi.encode(current, i, sender, beneficiary, amountSpecified, zeroForOne, count));
-            if (hook.outcomeForRoll(uint256(next) % hook.ROLL_RANGE(), corruption) == target) {
+            uint256 roll =
+                uint256(keccak256(abi.encode(bytes32(i), block.chainid, address(hook.game()), ticket))) % 1000;
+            if (hook.outcomeForRoll(roll, level) == target) {
                 vm.prevrandao(bytes32(i));
+                hook.game().captureEntropy();
+                vm.roll(targetBlock + 1);
                 return;
             }
         }
-        revert("steer: no prevrandao found");
+        revert("prepareDraw: no entropy found");
     }
 
     function abs1(BalanceDelta delta) internal pure returns (uint256) {

@@ -6,8 +6,8 @@ import {HauntedVault} from "./HauntedVault.sol";
 /// @title JackpotVault
 /// @notice ETH reserve for the "mini jackpot" swap outcome. A payout is at most 3% of the reserve
 /// (MAX_PAYOUT_BPS, immutable), at most once per cooldown, only while not paused, and only when
-/// requested by a PAYER_ROLE holder (the HauntedHook once the admin grants it the role).
-/// @dev No admin withdrawal exists. Funding is permissionless.
+/// requested by a PAYER_ROLE holder (the HauntedHook, granted atomically by the launch bundle).
+/// @dev The admin can grant itself PAYER_ROLE and receive capped payouts once per cooldown.
 contract JackpotVault is HauntedVault {
     /// @notice Role allowed to trigger payouts. Intended holder: the HauntedHook.
     bytes32 public constant PAYER_ROLE = keccak256("PAYER_ROLE");
@@ -19,7 +19,7 @@ contract JackpotVault is HauntedVault {
 
     /// @param admin Project owner: DEFAULT_ADMIN_ROLE and PAUSER_ROLE.
     /// @param payoutBps Opening payout share in basis points, in (0, 300].
-    /// @param cooldownSeconds Minimum seconds between two payouts, at most 30 days.
+    /// @param cooldownSeconds Minimum seconds between two payouts, in 1 second..30 days.
     constructor(address admin, uint256 payoutBps, uint256 cooldownSeconds)
         HauntedVault(admin, MAX_PAYOUT_BPS, payoutBps, cooldownSeconds)
     {}
