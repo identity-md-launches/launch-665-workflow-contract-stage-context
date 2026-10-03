@@ -1,0 +1,31 @@
+{
+  "kind": "evm_project",
+  "token": {
+    "contract": "LaunchToken",
+    "name": "Haunted VOID",
+    "symbol": "VOID",
+    "decimals": 18
+  },
+  "contracts": [
+    {
+      "contract": "HauntedDeployment",
+      "constructorArgs": [
+        "0xe03a1074c86cfedd5c142c4f04f1a1536e203543",
+        "$token",
+        "$owner",
+        "$token",
+        "300",
+        "600",
+        "100",
+        "3600"
+      ]
+    }
+  ],
+  "pool": {
+    "pairedCurrency": "0x0000000000000000000000000000000000000000",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "initialPrice": "79228162514264337593543950336"
+  },
+  "notes": "Experimental Sepolia testnet project. This manifest describes the revised accepted tree, in which the canonical launch is one constructor-only bundle. LaunchToken (Haunted VOID, VOID, 18 decimals, fixed 10^27 minor units to the factory) has no constructor arguments. HauntedDeployment(poolManager, token, owner, charity, jackpotBps, jackpotCooldown, charityBps, charityCooldown) creates JackpotVault (3% cap, opening 300 bps, 600 s cooldown) and CharityVault (1% cap, opening 100 bps, 3600 s cooldown), mines the child hook salt against its own address so HauntedHook lands on an address with exactly the afterInitialize|beforeSwap|afterSwap bits (0x10C0), deploys the hook and its HauntedGame router, grants the hook PAYER_ROLE and SIGNALER_ROLE, hands DEFAULT_ADMIN_ROLE and PAUSER_ROLE on both vaults to $owner and renounces its own roles before construction ends. The bundle has no privileged methods; no initialization call is needed and none is encoded. Do not list the child contracts separately. The outer CREATE2 salt needs no special bits. Measured constructor cost in the local harness is about 9.7 million gas; it varies with the bundle address and resolved inputs, so the deployer must simulate the exact launch against its gas ceiling and pick another ordinary outer salt if needed. The first argument is the Uniswap v4 PoolManager on Sepolia (0xE03A1074c86CFeDd5C142C4F04F1a1536e203543, developers.uniswap.org v4 deployments); the hook constructor only requires it to be nonzero, so chain/network compatibility is a policy check. CHARITY BENEFICIARY: the approved brief names no charity and does not authorise the project owner as the donation recipient, so the charity argument is deliberately NOT $owner. It resolves to the launch token address, which cannot receive ETH: CharityVault.donate() reverts with TransferFailed, the hook records CharitySkipped, no ETH leaves the vault and no cooldown is consumed. Donations therefore fail closed until $owner, as vault admin, calls CharityVault.setCharity with a requester-approved charity address; after that the charity signal pays at most 1% of the reserve per cooldown to that address. Naming a charity is a requester decision outside this manifest; the site must show the configured charity and must not show a charity total before one is set. All owner/admin arguments resolve only through policy via $owner; no privileged wallet is named. POOL: this pool block describes the factory's own native-ETH launch pool (fee 3000, tickSpacing 60, factory PoolInitializationGuard, opening fee from LaunchFees). That pool is not haunted and cannot be: HauntedHook.afterInitialize requires the dynamic-fee flag 0x800000, tickSpacing 60 and opening price 2^96, and the guard has no swap callbacks. Listing the bundle does not attach the hook to the launch pool. The haunted ETH/VOID pool is a second pool with PoolKey {currency0: ETH, currency1: VOID, fee: 0x800000, tickSpacing: 60, hooks: HauntedDeployment.hook()}, initialised at exactly sqrtPriceX96 2^96 by the owner or anyone after launch and supplied with liquidity from the requester's own share; the factory cannot seed a hooked pool. Until that pool exists and is funded, no swap is haunted and no outcome event is emitted. The frontend must use that haunted PoolKey and hook.game() for the game, not the launch pool key. Read hook(), jackpotVault(), charityVault(), hookSalt() from the bundle for the deployment handoff. The hook's owner test controls are not chain-restricted; the deployment chain is enforced by service policy. Notes are explanatory only and authorise no beneficiary, policy change or extra deployment. Publication, attestation, independent review, admission, deployment and the frontend remain service responsibilities; none is claimed complete."
+}
