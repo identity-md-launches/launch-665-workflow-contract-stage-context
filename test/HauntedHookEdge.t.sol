@@ -21,7 +21,7 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {HauntedHook} from "../src/HauntedHook.sol";
 import {HauntedVault} from "../src/HauntedVault.sol";
 
-/// @dev A jackpot winner that swaps on a *different* haunted pool from inside the payout.
+/// @dev A jackpot winner that attempts a swap on a rejected second pool from inside the payout.
 contract CrossPoolReentrantWinner {
     IPoolManager internal manager;
     PoolKey internal otherKey;
@@ -143,31 +143,49 @@ contract HauntedHookEdgeTest is HauntedFixture {
 
     // ------------------------------------------------------------------ beneficiary edge inputs
 
-    function test_hookDataWithDirtyUpperBitsRevertsTheSwap() public {
-        // 32 bytes that are not a clean address: abi.decode refuses it, so the swap reverts in
-        // beforeSwap instead of silently paying a mangled address. Only the sender's own swap fails.
-        bytes memory dirty = abi.encodePacked(bytes32(uint256(uint160(alice)) | (uint256(1) << 200)));
-        assertEq(dirty.length, 32);
-        vm.expectRevert(wrapped(IHooks.beforeSwap.selector, ""));
-        swap(true, -1 ether, dirty);
-        assertEq(hook.swapCount(), 0);
-        assertFalse(hook.swapPending(), "a reverted swap leaves nothing pending");
-    }
-
-    function test_hookDataOfTwoWordsFallsBackToRouter() public {
+    function test_hookDataWithDirtyUpperBitsSkipsJackpotWithoutRevertingSwap() public {
         jackpot.fund{value: 10 ether}();
         force(HauntedHook.Outcome.MiniJackpot);
-        vm.expectEmit(true, true, false, false, address(hook));
-        emit HauntedHook.JackpotSkipped(poolId, address(swapRouter), "");
+        // Dirty upper bits must not be truncated into an eligible beneficiary.
+        bytes memory dirty = abi.encodePacked(bytes32(uint256(uint160(alice)) | (uint256(1) << 200)));
+        assertEq(dirty.length, 32);
+        vm.expectEmit(address(hook));
+        emit HauntedHook.JackpotSkipped(
+            poolId, address(0), abi.encodeWithSelector(HauntedHook.MissingBeneficiary.selector)
+        );
+        assertGt(abs1(swap(true, -1 ether, dirty)), 0);
+        assertEq(hook.swapCount(), 1);
+        assertFalse(hook.swapPending());
+        assertEq(jackpot.reserve(), 10 ether);
+        assertEq(jackpot.releaseCount(), 0);
+        assertEq(jackpot.totalReleased(), 0);
+        assertEq(jackpot.lastReleaseAt(), 0);
+        assertEq(alice.balance, 0);
+        assertEq(address(swapRouter).balance, 0);
+        // The skipped payout consumes no cooldown; a canonical beneficiary can still win.
+        swap(true, -1 ether, abi.encode(alice));
+        assertEq(alice.balance, 0.3 ether);
+    }
+
+    function test_hookDataOfTwoWordsSkipsJackpotWithoutPayingRouter() public {
+        jackpot.fund{value: 10 ether}();
+        force(HauntedHook.Outcome.MiniJackpot);
+        vm.expectEmit(address(hook));
+        emit HauntedHook.JackpotSkipped(
+            poolId, address(0), abi.encodeWithSelector(HauntedHook.MissingBeneficiary.selector)
+        );
         swap(true, -1 ether, abi.encode(alice, bob));
         assertEq(alice.balance, 0);
         assertEq(bob.balance, 0);
+        assertEq(address(swapRouter).balance, 0);
+        assertEq(jackpot.reserve(), 10 ether);
+        assertEq(jackpot.releaseCount(), 0);
     }
 
-    function test_hookDataOfOneByteFallsBackToRouter() public {
+    function test_hookDataOfOneByteHasNoBeneficiary() public {
         force(HauntedHook.Outcome.NormalTrade);
         vm.expectEmit(address(hook));
-        emit HauntedHook.NormalTrade(poolId, address(swapRouter), 3000);
+        emit HauntedHook.NormalTrade(poolId, address(0), 3000);
         swap(true, -1 ether, hex"01");
     }
 
@@ -308,7 +326,7 @@ contract HauntedHookEdgeTest is HauntedFixture {
 
     // ------------------------------------------------------------------ forced state and the seed
 
-    function test_forcedOutcomePersistsUntilClearedAndClearingRestoresTheDraw() public {
+    function test_forcedOutcomePersistsUntilClearedAndClearingRestoresNormalTrades() public {
         force(HauntedHook.Outcome.FreeSwap);
         for (uint256 i; i < 3; ++i) {
             vm.expectEmit(address(hook));
@@ -317,13 +335,17 @@ contract HauntedHookEdgeTest is HauntedFixture {
         }
         vm.prank(owner);
         hook.clearForcedOutcome();
-        // Steer the draw to a normal trade and check the event says it was not forced.
-        steer(HauntedHook.Outcome.NormalTrade, address(swapRouter), alice, -0.1 ether, true);
+        // Unforced direct swaps pay the base fee and cannot draw or advance the game.
+        uint256 expected = expectedOut(true, 0.1 ether, 3000);
+        uint256 corruptionBefore = hook.corruption();
         vm.recordLogs();
-        swap(true, -0.1 ether, abi.encode(alice));
-        (,, bool forced,, uint256 index) = lastSwapResolved();
+        assertEq(abs1(swap(true, -0.1 ether, abi.encode(alice))), expected);
+        (uint24 fee, uint256 roll, bool forced,, uint256 index) = lastSwapResolved();
+        assertEq(fee, 3000);
+        assertEq(roll, 0);
         assertFalse(forced);
         assertEq(index, 4);
+        assertEq(hook.corruption(), corruptionBefore);
     }
 
     function test_seedAdvancesEvenWhenForced() public {
@@ -422,10 +444,14 @@ contract HauntedHookEdgeTest is HauntedFixture {
 
     // ------------------------------------------------------------------ cross-pool re-entry
 
-    function test_nestedSwapOnAnotherHauntedPoolDuringPayoutIsRejected() public {
+    function test_rejectedSecondPoolCannotBeUsedDuringPayout() public {
         PoolKey memory k2 = hauntedKey(10);
+        vm.expectRevert(
+            wrapped(IHooks.afterInitialize.selector, abi.encodeWithSelector(HauntedHook.PoolAlreadyHaunted.selector))
+        );
         manager.initialize(k2, SQRT_PRICE_1_1);
-        lpRouter.modifyLiquidity{value: 20 ether}(k2, ModifyLiquidityParams(-887_220, 887_220, 1e19, 0), "");
+        assertFalse(hook.haunted(k2.toId()));
+        assertEq(hook.hauntedPools(), 1);
         CrossPoolReentrantWinner w = new CrossPoolReentrantWinner(manager, k2);
 
         jackpot.fund{value: 10 ether}();
@@ -440,20 +466,21 @@ contract HauntedHookEdgeTest is HauntedFixture {
         assertEq(address(w).balance, 0);
         assertEq(hook.swapCount(), 1, "the nested swap never counted");
         assertFalse(hook.swapPending());
-        // The guard is global: with a swap pending on pool 1, pool 2's beforeSwap is refused too.
+        // A callback for a rejected pool cannot overwrite a pending canonical swap.
         SwapParams memory p = swapParams(true, -1 ether);
         vm.startPrank(address(manager));
         hook.beforeSwap(address(this), key, p, "");
         vm.expectRevert(HauntedHook.SwapAlreadyPending.selector);
         hook.beforeSwap(address(this), k2, p, "");
         hook.afterSwap(address(this), key, p, BalanceDelta.wrap(0), "");
+        vm.expectRevert(HauntedHook.PoolNotHaunted.selector);
+        hook.beforeSwap(address(this), k2, p, "");
         vm.stopPrank();
         assertEq(hook.swapCount(), 2, "the direct callback pair counted as one swap");
-        // Both pools keep working afterwards.
+        // The canonical pool remains usable after the failed initialization and nested swap.
         force(HauntedHook.Outcome.NormalTrade);
-        swapAs(address(this), k2, true, -0.01 ether, abi.encode(alice));
         swap(true, -0.01 ether, abi.encode(alice));
-        assertEq(hook.swapCount(), 4);
+        assertEq(hook.swapCount(), 3);
     }
 
     function test_swapOnAnUninitialisedHauntedKeyReverts() public {
@@ -464,16 +491,22 @@ contract HauntedHookEdgeTest is HauntedFixture {
         assertEq(hook.swapCount(), 0);
     }
 
-    function test_zeroLiquidityHauntedPoolStillResolves() public {
-        PoolKey memory k2 = hauntedKey(10);
-        manager.initialize(k2, SQRT_PRICE_1_1);
+    function test_zeroLiquidityHauntedPoolResolvesWithoutGameEffects() public {
+        lpRouter.modifyLiquidity(
+            key, ModifyLiquidityParams(FULL_RANGE_LOWER, FULL_RANGE_UPPER, -int256(uint256(LIQUIDITY)), 0), ""
+        );
+        assertEq(manager.getLiquidity(poolId), 0);
         token.transfer(address(hook), 1_000 ether);
         force(HauntedHook.Outcome.VoidBurn);
         vm.expectEmit(address(hook));
-        emit HauntedHook.BurnSkipped(k2.toId(), alice, 1_000 ether);
-        BalanceDelta d = swapAs(address(this), k2, true, -1 ether, abi.encode(alice));
+        emit HauntedHook.NormalTrade(poolId, alice, 3000);
+        BalanceDelta d = swap(true, -1 ether, abi.encode(alice));
+        assertEq(abs0(d), 0, "no ETH moved");
         assertEq(abs1(d), 0, "no VOID moved");
         assertEq(hook.swapCount(), 1);
         assertEq(hook.totalBurned(), 0);
+        assertEq(hook.hoard(), 1_000 ether);
+        assertEq(hook.corruption(), 0);
+        assertFalse(hook.swapPending());
     }
 }

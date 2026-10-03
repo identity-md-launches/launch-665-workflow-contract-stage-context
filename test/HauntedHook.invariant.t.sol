@@ -196,8 +196,9 @@ contract HauntedHookInvariantTest is HauntedFixture {
         assertEq(jackpot.reserve() + jackpot.totalReleased(), handler.jackpotFunded());
         assertEq(charity.reserve() + charity.totalReleased(), handler.charityFunded());
         assertEq(charityWallet.balance, charity.totalReleased());
-        // Jackpots go to a named actor or to the router (which forwards nothing), never elsewhere.
-        assertEq(handler.actorBalances() + address(swapRouter).balance, jackpot.totalReleased());
+        // Missing beneficiaries must never redirect a jackpot to the router.
+        assertEq(address(swapRouter).balance, 0);
+        assertEq(handler.actorBalances(), jackpot.totalReleased());
     }
 
     function invariant_vaultRulesHeldAroundSwaps() public view {

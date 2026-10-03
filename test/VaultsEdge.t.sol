@@ -120,7 +120,7 @@ contract VaultsEdgeTest is Test {
     ) public {
         reserve = bound(reserve, 0, 1e24);
         bps = bound(bps, 1, 300);
-        cooldown = bound(cooldown, 0, 30 days);
+        cooldown = bound(cooldown, 1, 30 days);
         elapsed = bound(elapsed, 0, 45 days);
 
         vm.startPrank(owner);
@@ -148,17 +148,29 @@ contract VaultsEdgeTest is Test {
 
     // ------------------------------------------------------------------ cooldown edges
 
-    function test_zeroCooldownAllowsBackToBackPayoutsEachCapped() public {
+    function test_zeroCooldownRejectedAndMinimumCooldownPreventsBackToBackPayouts() public {
+        vm.expectRevert(abi.encodeWithSelector(HauntedVault.InvalidCooldown.selector, 0, 30 days));
         vm.prank(owner);
         jackpot.setCooldown(0);
+        assertEq(jackpot.cooldown(), 10 minutes, "rejected setting leaves cooldown unchanged");
+        vm.prank(owner);
+        jackpot.setCooldown(1);
         vm.deal(address(jackpot), 10 ether);
         vm.startPrank(hook);
         assertEq(jackpot.payout(winner), 0.3 ether);
+        uint256 availableAt = block.timestamp + 1;
+        vm.expectRevert(abi.encodeWithSelector(HauntedVault.CooldownActive.selector, availableAt));
+        jackpot.payout(winner);
+        assertEq(jackpot.releaseCount(), 1);
+        assertEq(jackpot.reserve(), 9.7 ether);
+        vm.warp(availableAt);
         assertEq(jackpot.payout(winner), 0.291 ether, "3% of the reduced reserve");
+        vm.warp(availableAt + 1);
         assertEq(jackpot.payout(winner), 0.28227 ether);
         vm.stopPrank();
         assertEq(jackpot.releaseCount(), 3);
-        assertEq(jackpot.releaseAvailableAt(), block.timestamp, "zero cooldown: available immediately");
+        assertEq(jackpot.releaseAvailableAt(), block.timestamp + 1);
+        assertFalse(jackpot.canRelease());
         assertEq(jackpot.reserve() + jackpot.totalReleased(), 10 ether);
     }
 
@@ -390,10 +402,11 @@ contract VaultsEdgeTest is Test {
         reserve = bound(reserve, 1 ether, 1e24);
         count = uint8(bound(count, 1, 20));
         vm.prank(owner);
-        jackpot.setCooldown(0);
+        jackpot.setCooldown(1);
         vm.deal(address(jackpot), reserve);
         uint256 remaining = reserve;
         for (uint256 i; i < count; ++i) {
+            if (i != 0) vm.warp(block.timestamp + 1);
             uint256 before = jackpot.reserve();
             vm.prank(hook);
             uint256 paid = jackpot.payout(winner);

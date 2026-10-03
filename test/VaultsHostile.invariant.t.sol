@@ -15,8 +15,8 @@ contract Refuser {
 
 /// @dev Drives both vaults at once with hostile recipients, role churn, charity re-pointing, pauses,
 /// config changes and time. Every release attempt is checked against `canRelease()` before the call
-/// and against a "no trace on failure" rule after it. Recipients are plain EOAs plus one refuser;
-/// the vaults themselves are deliberately not candidates (see .imd-findings.json).
+/// and against a "no trace on failure" rule after it. Jackpot recipients include plain EOAs, a
+/// refuser, zero and the vault itself; invalid recipients must leave reserves and accounting intact.
 contract HostileVaultHandler is Test {
     JackpotVault public jackpot;
     CharityVault public charity;
@@ -49,6 +49,8 @@ contract HostileVaultHandler is Test {
             charities.push(makeAddr(string.concat("charity", vm.toString(i))));
         }
         jackpotWinners.push(address(refuser));
+        jackpotWinners.push(address(0));
+        jackpotWinners.push(address(jackpot));
         charities.push(address(refuser));
     }
 
@@ -80,7 +82,8 @@ contract HostileVaultHandler is Test {
 
     function payJackpot(uint256 winnerSeed) external {
         address winner = jackpotWinners[winnerSeed % jackpotWinners.length];
-        bool predicted = jackpot.canRelease() && payerHasRole && winner != address(refuser);
+        bool predicted = jackpot.canRelease() && payerHasRole && winner != address(refuser) && winner != address(0)
+            && winner != address(jackpot);
         uint256 reserveBefore = jackpot.reserve();
         uint256 releasedBefore = jackpot.totalReleased();
         uint256 countBefore = jackpot.releaseCount();
@@ -170,7 +173,7 @@ contract HostileVaultHandler is Test {
 
     function setJackpotConfig(uint256 bps, uint256 cooldown) external {
         bps = bound(bps, 1, 300);
-        cooldown = bound(cooldown, 0, 30 days);
+        cooldown = bound(cooldown, 1, 30 days);
         vm.startPrank(admin);
         jackpot.setReleaseBps(bps);
         jackpot.setCooldown(cooldown);
@@ -179,7 +182,7 @@ contract HostileVaultHandler is Test {
 
     function setCharityConfig(uint256 bps, uint256 cooldown) external {
         bps = bound(bps, 1, 100);
-        cooldown = bound(cooldown, 0, 30 days);
+        cooldown = bound(cooldown, 1, 30 days);
         vm.startPrank(admin);
         charity.setReleaseBps(bps);
         charity.setCooldown(cooldown);
@@ -202,6 +205,25 @@ contract HostileVaultHandler is Test {
         require(jackpot.releaseBps() == bpsBefore && jackpot.cooldown() == cooldownBefore, "config changed");
     }
 
+    /// @dev Former bypasses remain invalid throughout role, pause and payout sequences.
+    function rejectZeroCooldownAndSelfCharity() external {
+        uint256 jackpotCooldown = jackpot.cooldown();
+        uint256 charityCooldown = charity.cooldown();
+        address recipient = charity.charity();
+        bytes memory reason = abi.encodeWithSelector(HauntedVault.InvalidCooldown.selector, 0, 30 days);
+        vm.startPrank(admin);
+        vm.expectRevert(reason);
+        jackpot.setCooldown(0);
+        vm.expectRevert(reason);
+        charity.setCooldown(0);
+        vm.expectRevert(HauntedVault.SelfRecipient.selector);
+        charity.setCharity(address(charity));
+        vm.stopPrank();
+        assertEq(jackpot.cooldown(), jackpotCooldown);
+        assertEq(charity.cooldown(), charityCooldown);
+        assertEq(charity.charity(), recipient);
+    }
+
     /// @dev Strangers never get anywhere.
     function strangerAttempts(uint256 seed) external {
         address stranger = makeAddr(string.concat("stranger", vm.toString(seed % 5)));
@@ -220,6 +242,8 @@ contract HostileVaultHandler is Test {
 
     function jackpotWinnerBalances() external view returns (uint256 total) {
         for (uint256 i; i < jackpotWinners.length; ++i) {
+            // The vault is an invalid payout target, not an external recipient of released funds.
+            if (jackpotWinners[i] == address(jackpot)) continue;
             total += jackpotWinners[i].balance;
         }
     }
@@ -286,9 +310,12 @@ contract VaultsHostileInvariantTest is Test {
         assertLe(jackpot.releaseBps(), 300);
         assertGt(charity.releaseBps(), 0);
         assertLe(charity.releaseBps(), 100);
+        assertGe(jackpot.cooldown(), 1);
+        assertGe(charity.cooldown(), 1);
         assertLe(jackpot.cooldown(), 30 days);
         assertLe(charity.cooldown(), 30 days);
         assertTrue(charity.charity() != address(0));
+        assertTrue(charity.charity() != address(charity));
         assertEq(jackpot.hasRole(jackpot.PAYER_ROLE(), address(handler)), handler.payerHasRole());
         assertEq(charity.hasRole(charity.SIGNALER_ROLE(), address(handler)), handler.signalerHasRole());
     }
